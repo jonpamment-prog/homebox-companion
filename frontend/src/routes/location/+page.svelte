@@ -109,6 +109,22 @@
 
 		await locationNavigator.loadTree();
 		await fetchTags();
+
+		// Deep-link: `?loc=<locationId>` pre-selects that location (e.g. from an NFC
+		// tag or a printed "add here" QR), landing on the selected/capture step with
+		// no manual browsing. Mirrors what scanning a location QR does.
+		const deepLinkLoc = new URL(window.location.href).searchParams.get('loc');
+		if (deepLinkLoc && /^[a-f0-9-]+$/i.test(deepLinkLoc)) {
+			isProcessingQr = true;
+			try {
+				await applyLocationId(deepLinkLoc);
+			} catch (err) {
+				log.error('Deep-link location select failed', err);
+				showToast('Could not open that location.', 'error');
+			} finally {
+				isProcessingQr = false;
+			}
+		}
 	});
 
 	// Handler for pull-to-refresh: refreshes current view without resetting navigation
@@ -239,6 +255,30 @@
 		showQrScanner = false;
 	}
 
+	// Fetch a location by id and select it. Shared by the QR scanner and the
+	// `?loc=` deep-link so both take the exact same path. Throws on API error so
+	// callers can surface an appropriate message.
+	async function applyLocationId(locationId: string): Promise<void> {
+		const location = await locationsApi.get(locationId);
+
+		if (!location) {
+			showToast('Location not found in your Homebox.', 'error');
+			return;
+		}
+
+		// For a single-location lookup we don't have the parent hierarchy, so the
+		// path is just the location name (same as a QR scan).
+		const locationData: Location = {
+			id: location.id,
+			name: location.name,
+			description: location.description || '',
+			itemCount: location.itemCount ?? 0,
+			children: location.children || [],
+		};
+
+		locationNavigator.selectLocation(locationData, location.name);
+	}
+
 	async function handleQrScan(decodedText: string) {
 		showQrScanner = false;
 		isProcessingQr = true;
@@ -253,35 +293,10 @@
 
 			if (!locationIdMatch) {
 				showToast('Invalid QR code. Not a Homebox location.', 'error');
-				isProcessingQr = false;
 				return;
 			}
 
-			const locationId = locationIdMatch[1];
-
-			// Fetch location details from API
-			const location = await locationsApi.get(locationId);
-
-			if (!location) {
-				showToast('Location not found in your Homebox.', 'error');
-				isProcessingQr = false;
-				return;
-			}
-
-			// Build location path - for QR scans, we just use the location name
-			// since we don't have the parent hierarchy from a single API call
-			const locationPath = location.name;
-
-			// Set the location
-			const locationData: Location = {
-				id: location.id,
-				name: location.name,
-				description: location.description || '',
-				itemCount: location.itemCount ?? 0,
-				children: location.children || [],
-			};
-
-			locationNavigator.selectLocation(locationData, locationPath);
+			await applyLocationId(locationIdMatch[1]);
 		} catch (error) {
 			log.error('QR scan error', error);
 			if (error instanceof ApiError) {
